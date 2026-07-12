@@ -168,6 +168,7 @@ public final class KokoroTTS {
   public func generateAudio(voice: MLXArray, language: Language, text: String, speed: Float = 1.0) throws -> ([Float], [MToken]?) {
     // Update language if it has changed
     try updateLanguageIfNeeded(language)
+    KokoroTTS.mark("7a-lang-ok")
 
     // Start performance timing
     BenchmarkTimer.reset()
@@ -175,12 +176,15 @@ public final class KokoroTTS {
 
     // Step 1: Convert text to phonemes
     let (phonemizedText, tokenArray) = try phonemizeText(text)
+    KokoroTTS.mark("7b-phonemize-ok")
     
     // Step 2: Tokenize and prepare input
     let (paddedInputIds, attentionMask, inputLengths, textMask, inputIds) = try prepareInputTensors(phonemizedText)
+    KokoroTTS.mark("7c-tokenize-ok")
     
     // Step 3: Extract style embeddings from voice
     let (globalStyle, acousticStyle) = extractStyleEmbeddings(from: voice, tokenCount: inputIds.count)
+    KokoroTTS.mark("7d-style-ok")
     
     // Step 4: Encode text with BERT and predict duration
     let durationFeatures = encodeBERTAndDuration(
@@ -190,6 +194,7 @@ public final class KokoroTTS {
       textMask: textMask,
       style: globalStyle
     )
+    KokoroTTS.mark("7e-bert-ok")
     
     // Step 5: Predict phoneme durations
     let (predictedDurations, alignmentTarget) = predictDurations(
@@ -197,16 +202,19 @@ public final class KokoroTTS {
       batchSize: paddedInputIds.shape[1],
       speed: speed
     )
+    KokoroTTS.mark("7f-duration-ok")
     
     // Step 6: Generate aligned encodings
     let alignedEncoding = durationFeatures.transposed(0, 2, 1).matmul(alignmentTarget)
     
     // Step 7: Predict prosody (F0, pitch)
     let (f0Prediction, nPrediction) = prosodyPredictor.F0NTrain(x: alignedEncoding, s: globalStyle)
+    KokoroTTS.mark("7g-prosody-ok")
     
     // Step 8: Encode text for decoder
     let textEncoding = textEncoder(paddedInputIds, inputLengths: inputLengths, m: textMask)
     let asrFeatures = MLX.matmul(textEncoding, alignmentTarget)
+    KokoroTTS.mark("7h-textenc-ok")
     
     // Step 9: Generate audio
     let audio = decoder(
@@ -215,6 +223,7 @@ public final class KokoroTTS {
       N: nPrediction,
       s: acousticStyle
     )[0]
+    KokoroTTS.mark("7i-decoder-ok")
     
     // Try to predict timestamp of each token if G2P processor returns tokens
     if let tokenArray {
@@ -224,7 +233,16 @@ public final class KokoroTTS {
     // Stop performance timing
     BenchmarkTimer.stopTimer(Constants.bm_TTS)
 
-    return (audio[0].asArray(Float.self), tokenArray)
+    let audioOut = audio[0].asArray(Float.self)
+    KokoroTTS.mark("7j-eval-ok")
+    return (audioOut, tokenArray)
+  }
+
+  /// Fork diagnostic: persists the last-reached generateAudio stage to
+  /// UserDefaults (survives a hard native crash) so the host app can report it.
+  private static func mark(_ stage: String) {
+    UserDefaults.standard.set(stage, forKey: "kokoroCrashStage")
+    UserDefaults.standard.synchronize()
   }
   
   /// Updates the G2P language if it differs from the current language.
