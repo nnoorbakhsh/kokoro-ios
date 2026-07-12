@@ -166,6 +166,10 @@ public final class KokoroTTS {
   /// - Throws: `KokoroTTSError.tooManyTokens` if text is too long,
   ///           or `G2PProcessorError` if G2P processing fails
   public func generateAudio(voice: MLXArray, language: Language, text: String, speed: Float = 1.0) throws -> ([Float], [MToken]?) {
+    // Transformer/prosody stages run on the GPU (fast). The vocoder/decoder is
+    // moved to the CPU stream below to avoid the iOS-GPU conv1d 32768-frame
+    // index overflow (mlx-swift #424) that corrupts/crashes long sentences.
+    Device.setDefault(device: .gpu)
     // Update language if it has changed
     try updateLanguageIfNeeded(language)
     KokoroTTS.mark("7a-lang-ok")
@@ -216,7 +220,12 @@ public final class KokoroTTS {
     let asrFeatures = MLX.matmul(textEncoding, alignmentTarget)
     KokoroTTS.mark("7h-textenc-ok")
     
-    // Step 9: Generate audio
+    // Step 9: Generate audio — run the vocoder on the CPU stream. MLX's CPU conv
+    // is correct; the iOS GPU conv silently overflows a 16-bit index once the
+    // decoder output passes 32768 frames (~1.4s audio), corrupting or crashing
+    // long sentences (mlx-swift #424 / #407). Transformer output above is short
+    // (token length) so it stays safely on GPU.
+    Device.setDefault(device: .cpu)
     let audio = decoder(
       asr: asrFeatures,
       F0Curve: f0Prediction,
@@ -235,6 +244,7 @@ public final class KokoroTTS {
 
     let audioOut = audio[0].asArray(Float.self)
     KokoroTTS.mark("7j-eval-ok")
+    Device.setDefault(device: .gpu)   // restore GPU as default for the next call
     return (audioOut, tokenArray)
   }
 
